@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bundle — merge cover, video and HTML</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    --ink: #1E2A44;
+    --paper: #EEF0F3;
+    --card: #FFFFFF;
+    --slate: #5B6478;
+    --line: #CFD4DD;
+    --signal: #F2C230;
+    --ok: #2F7D5B;
+    --err: #B3322B;
+    --on-signal: #1E2A44;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #E6EAF2; --paper: #131A2A; --card: #1B2438; --slate: #9AA3B8;
+      --line: #2E3A55; --signal: #F2C230; --ok: #5FC08F; --err: #F07A72; --on-signal: #131A2A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #E6EAF2; --paper: #131A2A; --card: #1B2438; --slate: #9AA3B8;
+    --line: #2E3A55; --signal: #F2C230; --ok: #5FC08F; --err: #F07A72; --on-signal: #131A2A;
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.55;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 20px 72px; }
+  header h1 {
+    font-family: "Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+    font-weight: 700; font-size: clamp(2.2rem, 6vw, 3.6rem); line-height: 1.02;
+    letter-spacing: -0.02em; margin: 0 0 12px; max-width: 16ch;
+  }
+  header p { margin: 0; color: var(--slate); max-width: 58ch; }
+
+  .layout { display: grid; grid-template-columns: 1fr 280px; gap: 40px; margin-top: 40px; align-items: start; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } .stack { order: -1; } }
+
+  .slots { display: flex; flex-direction: column; gap: 14px; }
+  .slot {
+    display: grid; grid-template-columns: 44px 1fr; gap: 16px; align-items: start;
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 14px; padding: 18px;
+    transition: border-color .15s;
+  }
+  .slot.drag { border-color: var(--signal); border-style: dashed; }
+  .slot.filled { border-color: var(--ok); }
+  .num {
+    width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+    font-family: "Bricolage Grotesque", system-ui, sans-serif; font-weight: 700; font-size: 1.2rem;
+    background: var(--paper); color: var(--ink); border: 1.5px solid var(--line);
+  }
+  .slot.filled .num { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .slot h2 { margin: 2px 0 2px; font-size: 1.05rem; font-weight: 600; }
+  .slot .hint { margin: 0 0 12px; color: var(--slate); font-size: .92rem; }
+  .pick {
+    display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 9px 14px; border-radius: 9px; border: 1.5px solid var(--ink);
+    font-weight: 500; font-size: .95rem; background: transparent; color: var(--ink);
+  }
+  .pick:hover { background: var(--ink); color: var(--paper); }
+  .pick:focus-within { outline: 3px solid var(--signal); outline-offset: 2px; }
+  .pick input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .fileinfo { margin-top: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: .9rem; }
+  .fileinfo .name { font-weight: 500; word-break: break-all; }
+  .fileinfo .size { color: var(--slate); }
+  .thumb { max-width: 100%; max-height: 160px; border-radius: 8px; display: block; margin-top: 12px; border: 1px solid var(--line); }
+  .clear { background: none; border: 0; color: var(--err); cursor: pointer; font: inherit; font-size: .88rem; text-decoration: underline; padding: 0; }
+
+  .stack { position: sticky; top: calc(20px + env(safe-area-inset-top, 0px)); }
+  .stack h3 { margin: 0 0 10px; font-size: .95rem; font-weight: 600; }
+  .sheets { display: flex; flex-direction: column; }
+  .sheet {
+    background: var(--card); border: 1.5px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; font-size: .9rem; color: var(--slate);
+    margin-top: -6px; position: relative; transition: transform .25s, color .25s, border-color .25s;
+  }
+  .sheet:first-child { margin-top: 0; }
+  .sheet.on { color: var(--ink); border-color: var(--ink); transform: translateX(6px); }
+  .sheet b { display: block; color: inherit; font-weight: 600; }
+
+  label.field { display: block; margin-top: 20px; font-size: .9rem; font-weight: 500; }
+  label.field input {
+    display: block; width: 100%; margin-top: 6px; padding: 10px 12px; font: inherit;
+    border-radius: 9px; border: 1.5px solid var(--line); background: var(--card); color: var(--ink);
+  }
+  label.field input:focus { outline: 3px solid var(--signal); outline-offset: 1px; border-color: var(--ink); }
+
+  .go {
+    margin-top: 16px; width: 100%; padding: 14px 18px; border: 0; border-radius: 10px; cursor: pointer;
+    background: var(--signal); color: var(--on-signal); font: inherit; font-weight: 600; font-size: 1rem;
+  }
+  .go:disabled { opacity: .45; cursor: not-allowed; }
+  .go:focus-visible, .secondary:focus-visible, .clear:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .secondary {
+    margin-top: 10px; width: 100%; padding: 12px 18px; border-radius: 10px; cursor: pointer;
+    background: transparent; border: 1.5px solid var(--ink); color: var(--ink); font: inherit; font-weight: 500;
+  }
+  .status { margin-top: 12px; font-size: .9rem; min-height: 1.4em; }
+  .status.err { color: var(--err); }
+  .status.ok { color: var(--ok); }
+
+  .preview { margin-top: 48px; display: none; }
+  .preview.show { display: block; }
+  .preview h2 { font-family: "Bricolage Grotesque", system-ui, sans-serif; font-size: 1.6rem; margin: 0 0 12px; }
+  .preview iframe { width: 100%; height: 75vh; border: 1.5px solid var(--line); border-radius: 12px; background: #fff; }
+
+  .detect { margin-top: 14px; padding: 12px 14px; border-radius: 10px; font-size: .92rem; background: var(--paper); border-left: 4px solid var(--ok); }
+  .detect.warn { border-left-color: var(--signal); }
+  .detect.bad { border-left-color: var(--err); }
+  .detect b { font-weight: 600; }
+  .adv { margin-top: 14px; font-size: .92rem; }
+  .adv summary { cursor: pointer; color: var(--slate); }
+  .adv summary:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; }
+  .adv .hint { margin: 8px 0; }
+  code { font-size: .88em; background: var(--paper); padding: 1px 5px; border-radius: 4px; }
+  @media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Put a cover and a video in front of your HTML</h1>
+    <p>Add your three pieces below. The tool checks whether your HTML is a slide deck or a scrolling page, then puts the cover first, the video second and your content after them, in the same format.</p>
+  </header>
+
+  <div class="layout">
+    <div>
+      <div class="slots">
+        <section class="slot" data-kind="cover">
+          <div class="num" aria-hidden="true">1</div>
+          <div>
+            <h2>Cover page</h2>
+            <p class="hint">An image (JPG, PNG, WEBP, GIF or SVG). Shown full screen when the file opens.</p>
+            <label class="pick">Choose image<input type="file" accept="image/*"></label>
+            <div class="out"></div>
+          </div>
+        </section>
+        <section class="slot" data-kind="video">
+          <div class="num" aria-hidden="true">2</div>
+          <div>
+            <h2>Video</h2>
+            <p class="hint">MP4 or WEBM plays in every modern browser. Embedded directly, so it plays offline.</p>
+            <label class="pick">Choose video<input type="file" accept="video/*"></label>
+            <div class="out"></div>
+          </div>
+        </section>
+        <section class="slot" data-kind="html">
+          <div class="num" aria-hidden="true">3</div>
+          <div>
+            <h2>HTML file</h2>
+            <p class="hint">Slide decks are detected automatically, and the cover and video become slides 1 and 2. Other pages get them as full-screen pages at the top.</p>
+            <label class="pick">Choose HTML<input type="file" accept=".html,.htm,text/html"></label>
+            <div class="out"></div>
+            <div class="detect" id="detect" hidden></div>
+            <details class="adv">
+              <summary>Slides not detected correctly?</summary>
+              <p class="hint">Enter the CSS selector that matches each slide in your file, for example <code>.slide</code> or <code>.deck &gt; section</code>.</p>
+              <label class="field" style="margin-top:0">Slide selector
+                <input id="selector" type="text" placeholder="Leave empty for automatic" autocomplete="off" spellcheck="false">
+              </label>
+            </details>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <aside class="stack">
+      <h3>Your merged file</h3>
+      <div class="sheets">
+        <div class="sheet" id="s-cover"><b>Cover</b><span>Not added</span></div>
+        <div class="sheet" id="s-video"><b>Video</b><span>Not added</span></div>
+        <div class="sheet" id="s-html"><b>Page</b><span>Not added</span></div>
+      </div>
+      <label class="field">File name
+        <input id="fname" type="text" value="merged" autocomplete="off">
+      </label>
+      <button class="go" id="build" disabled>Merge and download</button>
+      <button class="secondary" id="prev" disabled>Preview</button>
+      <div class="status" id="status" role="status" aria-live="polite">Add all three to merge.</div>
+    </aside>
+  </div>
+
+  <section class="preview" id="preview">
+    <h2>Preview</h2>
+    <iframe id="frame" title="Merged file preview"></iframe>
+  </section>
+</div>
+
+<script>
+(function () {
+  const state = { cover: null, video: null, html: null };
+  let htmlText = null;      // raw text of the uploaded HTML
+  let detection = null;     // result of analysing it
+  const statusEl = document.getElementById("status");
+  const buildBtn = document.getElementById("build");
+  const prevBtn = document.getElementById("prev");
+  const detectEl = document.getElementById("detect");
+  const selectorEl = document.getElementById("selector");
+
+  /* ---------- helpers ---------- */
+  function fmt(b) { return b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB"; }
+  function setStatus(msg, kind) { statusEl.textContent = msg; statusEl.className = "status" + (kind ? " " + kind : ""); }
+  function readDataURL(f) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("Could not read " + f.name)); r.readAsDataURL(f); }); }
+  function readText(f) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("Could not read " + f.name)); r.readAsText(f); }); }
+  function videoMime(f) {
+    if (f.type) return f.type === "video/quicktime" ? "video/mp4" : f.type;
+    const n = f.name.toLowerCase();
+    return n.endsWith(".webm") ? "video/webm" : (n.endsWith(".ogg") || n.endsWith(".ogv")) ? "video/ogg" : "video/mp4";
+  }
+  function validFor(kind, f) {
+    const n = f.name.toLowerCase();
+    if (kind === "cover") return f.type.startsWith("image/");
+    if (kind === "video") return f.type.startsWith("video/") || /\.(mp4|webm|ogg|ogv|mov|m4v)$/.test(n);
+    return f.type === "text/html" || /\.html?$/.test(n);
+  }
+
+  /* ---------- step 1: find out what kind of HTML file this is ---------- */
+  const ACTIVE = ["active", "current", "present", "visible", "show", "shown", "is-active", "is-current", "is-visible", "selected", "swiper-slide-active"];
+  const topLevel = ns => ns.filter(n => !ns.some(o => o !== n && o.contains(n)));
+  const siblings = ns => { if (!ns.length) return []; const p = ns[0].parentElement; return ns.filter(n => n.parentElement === p); };
+  const all = (doc, sel) => { try { return [...doc.querySelectorAll(sel)]; } catch (e) { return null; } };
+
+  function hasDeckScript(doc) {
+    const js = [...doc.querySelectorAll("script")].map(s => s.textContent).join("\n");
+    const css = [...doc.querySelectorAll("style")].map(s => s.textContent).join("\n");
+    return /ArrowRight|ArrowLeft|PageDown|keyCode\s*===?\s*(37|39)|nextSlide|prevSlide|goToSlide|showSlide|currentSlide|slideIndex/i.test(js) ||
+           /scroll-snap-type/i.test(css);
+  }
+
+  function detect(doc, custom) {
+    if (custom) {
+      const n = all(doc, custom);
+      if (n === null) return { type: "error", label: "That selector isn't valid CSS. Check it and try again." };
+      const g = siblings(topLevel(n));
+      return g.length ? { type: "custom", label: "Slide deck (matched with your selector)", slides: g }
+                      : { type: "error", label: "No elements in the file match that selector." };
+    }
+    let n = all(doc, ".reveal .slides > section");
+    if (n.length) return { type: "reveal", label: "reveal.js slide deck", slides: n };
+    n = all(doc, ".marpit > svg, .marpit > section");
+    if (n.length) return { type: "marp", label: "Marp slide deck", slides: n };
+    n = siblings(all(doc, "#impress .step, .impress .step"));
+    if (n.length) return { type: "impress", label: "impress.js presentation", slides: n };
+    n = siblings(topLevel(all(doc, ".swiper-slide")));
+    if (n.length) return { type: "swiper", label: "Swiper slide deck", slides: n };
+    for (const sel of [".slide", "[data-slide]", ".slides > section", ".slides > div", ".deck > section", ".deck > div", ".slide-container > div", ".presentation > section", ".presentation > div"]) {
+      n = siblings(topLevel(all(doc, sel)));
+      if (n.length >= 2 || (sel === ".slide" && n.length)) return { type: "generic", label: "Slide deck", slides: n };
+    }
+    if (hasDeckScript(doc)) {
+      for (const sel of ["body > section", "main > section", "body > div > section", "body > main > div", "body > div > div"]) {
+        n = siblings(all(doc, sel));
+        if (n.length >= 2) return { type: "generic", label: "Slide deck", slides: n };
+      }
+    }
+    return { type: "scroll", label: "Scrolling web page" };
+  }
+
+  function analyse() {
+    if (!htmlText) { detection = null; detectEl.hidden = true; return; }
+    const doc = new DOMParser().parseFromString(htmlText, "text/html");
+    detection = detect(doc, selectorEl.value.trim());
+    detectEl.hidden = false;
+    if (detection.type === "error") {
+      detectEl.className = "detect bad";
+      detectEl.textContent = detection.label;
+    } else if (detection.type === "scroll") {
+      detectEl.className = "detect warn";
+      detectEl.innerHTML = "<b>Detected: scrolling web page.</b> No slides were found, so the cover and video will be added as full-screen pages at the top. If this file is a slide deck, enter its slide selector below.";
+    } else {
+      const c = detection.slides.length;
+      detectEl.className = "detect";
+      detectEl.innerHTML = "";
+      const b = document.createElement("b"); b.textContent = "Detected: " + detection.label + ", " + c + " slide" + (c === 1 ? "" : "s") + ".";
+      detectEl.append(b, " The cover becomes slide 1, the video slide 2, and your slides follow as 3 to " + (c + 2) + ".");
+    }
+    refresh();
+  }
+  let t; selectorEl.addEventListener("input", () => { clearTimeout(t); t = setTimeout(analyse, 300); });
+
+  /* ---------- step 2: build the merged file ---------- */
+  const EXTRA_CSS = `
+.mz-slide{background:#000!important;overflow:hidden!important}
+.mz-fill{position:absolute!important;inset:0!important;z-index:50!important;display:flex!important;align-items:center!important;justify-content:center!important;background:#000!important;margin:0!important;padding:0!important;transform:none!important}
+.mz-fill img,.mz-fill video{width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important;display:block!important;margin:0!important;padding:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:#000!important}
+html.mz-scroll{overflow-x:hidden}
+.mz-page{position:relative!important;left:50%!important;width:100vw!important;margin:0 0 0 -50vw!important;height:100vh!important;height:100dvh!important;padding:0!important;border:0!important;display:block!important;background:#000!important;overflow:hidden!important;page-break-after:always;break-after:page}`;
+
+  // Keeps the video paused when its slide isn't on screen, stops clicks on the
+  // video from advancing the deck, and gives unpositioned slides a size.
+  const RUNTIME = `(function(){
+function vis(el){var r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;if(r.right<=0||r.bottom<=0||r.left>=innerWidth||r.top>=innerHeight)return false;if(el.checkVisibility&&!el.checkVisibility({opacityProperty:true,visibilityProperty:true}))return false;return true;}
+function tick(){document.querySelectorAll('.mz-slide').forEach(function(s){if(getComputedStyle(s).position==='static')s.style.position='relative';if(s.getClientRects().length&&s.offsetHeight<40)s.style.minHeight=innerHeight+'px';});
+document.querySelectorAll('.mz-fill video').forEach(function(v){if(!v.paused&&!vis(v))v.pause();});}
+document.querySelectorAll('.mz-fill video').forEach(function(v){['click','mousedown','mouseup','pointerdown','pointerup','touchstart','touchend','wheel'].forEach(function(e){v.addEventListener(e,function(ev){ev.stopPropagation();});});});
+tick();setInterval(tick,400);addEventListener('resize',tick);
+})();`;
+
+  function stripAttrs(el, type) {
+    [el, ...el.querySelectorAll("[id]")].forEach(x => x.removeAttribute && x.removeAttribute("id"));
+    [...el.attributes].map(a => a.name).forEach(n => {
+      if (/^data-(background|auto-animate|transition|state|fragment|marpit-pagination)/.test(n)) el.removeAttribute(n);
+    });
+    if (type === "reveal") el.setAttribute("data-background-color", "#000000");
+  }
+
+  function makeSlide(doc, first, type, inner) {
+    const c = first.cloneNode(true);
+    stripAttrs(c, type);
+    let target = c;
+    if (c.namespaceURI === "http://www.w3.org/2000/svg") target = c.querySelector("section") || c;
+    if (target !== c) stripAttrs(target, type);
+    target.innerHTML = "";
+    const fill = doc.createElement("div");
+    fill.className = "mz-fill";
+    fill.innerHTML = inner;
+    target.appendChild(fill);
+    target.classList.add("mz-slide");
+    return c;
+  }
+
+  function injectHead(doc, css) {
+    const st = doc.createElement("style"); st.id = "mz-style"; st.textContent = css;
+    doc.head.appendChild(st);
+    if (!doc.querySelector("meta[charset]")) { const m = doc.createElement("meta"); m.setAttribute("charset", "UTF-8"); doc.head.prepend(m); }
+    if (!doc.querySelector('meta[name="viewport"]')) { const m = doc.createElement("meta"); m.name = "viewport"; m.content = "width=device-width, initial-scale=1"; doc.head.appendChild(m); }
+  }
+
+  async function buildMerged() {
+    const [coverURL, videoRaw] = await Promise.all([readDataURL(state.cover), readDataURL(state.video)]);
+    const mime = videoMime(state.video);
+    const videoURL = videoRaw.replace(/^data:[^;,]*/, "data:" + mime);
+    const imgHTML = '<img src="' + coverURL + '" alt="Cover page">';
+    const vidHTML = '<video controls playsinline preload="auto"><source src="' + videoURL + '" type="' + mime + '">Your browser can\'t play this video.</video>';
+
+    const doc = new DOMParser().parseFromString(htmlText, "text/html");
+    const d = detect(doc, selectorEl.value.trim());
+    if (d.type === "error") throw new Error(d.label);
+
+    injectHead(doc, EXTRA_CSS);
+
+    if (d.type === "scroll") {
+      doc.documentElement.classList.add("mz-scroll");
+      const cover = doc.createElement("section"); cover.className = "mz-page mz-slide"; cover.innerHTML = '<div class="mz-fill">' + imgHTML + "</div>";
+      const video = doc.createElement("section"); video.className = "mz-page mz-slide"; video.innerHTML = '<div class="mz-fill">' + vidHTML + "</div>";
+      doc.body.prepend(cover, video);
+    } else {
+      const first = d.slides[0];
+      const cover = makeSlide(doc, first, d.type, imgHTML);
+      const video = makeSlide(doc, first, d.type, vidHTML);
+      // the cover is now the starting slide: take "active" state away from the others
+      [video, first].forEach(el => {
+        const tgts = [el, ...(el.namespaceURI === "http://www.w3.org/2000/svg" ? el.querySelectorAll("section") : [])];
+        tgts.forEach(x => ACTIVE.forEach(c => x.classList.remove(c)));
+      });
+      if (d.slides[1]) {
+        const s2 = d.slides[1];
+        [video, first].forEach(el => {
+          if (s2.hasAttribute("aria-hidden")) el.setAttribute("aria-hidden", s2.getAttribute("aria-hidden"));
+          if (s2.hasAttribute("hidden")) el.setAttribute("hidden", "");
+        });
+        if (first.getAttribute("style") !== s2.getAttribute("style") && /display\s*:\s*none|opacity\s*:\s*0|visibility\s*:\s*hidden/i.test(s2.getAttribute("style") || "")) {
+          first.setAttribute("style", s2.getAttribute("style")); video.setAttribute("style", s2.getAttribute("style"));
+        }
+      }
+      if (d.type === "impress") {
+        const x0 = parseFloat(first.dataset.x || 0), y0 = parseFloat(first.dataset.y || 0);
+        const s2 = d.slides[1];
+        const dx = s2 ? (parseFloat(s2.dataset.x || 0) - x0) : 0, dy = s2 ? (parseFloat(s2.dataset.y || 0) - y0) : 0;
+        const sx = dx || dy ? dx : 1500, sy = dx || dy ? dy : 0;
+        cover.dataset.x = x0 - 2 * sx; cover.dataset.y = y0 - 2 * sy;
+        video.dataset.x = x0 - sx; video.dataset.y = y0 - sy;
+      }
+      first.before(cover, video);
+    }
+
+    const sc = doc.createElement("script"); sc.textContent = RUNTIME; doc.body.appendChild(sc);
+    return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+  }
+
+  /* ---------- UI ---------- */
+  function refresh() {
+    const ready = state.cover && state.video && state.html && detection && detection.type !== "error";
+    buildBtn.disabled = !ready; prevBtn.disabled = !ready;
+    const missing = ["cover", "video", "html"].filter(k => !state[k]).map(k => ({ cover: "cover", video: "video", html: "HTML file" })[k]);
+    if (missing.length) setStatus("Still needed: " + missing.join(", ") + ".");
+    else if (detection && detection.type === "error") setStatus("Fix the slide selector to continue.", "err");
+    else setStatus("Ready to merge.");
+    const slides = detection && detection.slides;
+    const names = slides
+      ? { cover: "Slide 1: cover", video: "Slide 2: video", html: "Slides 3 to " + (slides.length + 2) + ": your deck" }
+      : { cover: "Page 1: cover", video: "Page 2: video", html: "Then: your page" };
+    for (const k of ["cover", "video", "html"]) {
+      const s = document.getElementById("s-" + k);
+      s.classList.toggle("on", !!state[k]);
+      s.querySelector("b").textContent = names[k];
+      s.querySelector("span").textContent = state[k] ? state[k].name : "Not added";
+    }
+  }
+
+  async function accept(slot, file) {
+    const kind = slot.dataset.kind, out = slot.querySelector(".out");
+    if (!validFor(kind, file)) { setStatus(file.name + " isn't a valid " + (kind === "html" ? "HTML" : kind) + " file. Choose a different one.", "err"); return; }
+    state[kind] = file; slot.classList.add("filled"); out.innerHTML = "";
+    const info = document.createElement("div"); info.className = "fileinfo";
+    const nm = document.createElement("span"); nm.className = "name"; nm.textContent = file.name;
+    const sz = document.createElement("span"); sz.className = "size"; sz.textContent = fmt(file.size);
+    const rm = document.createElement("button"); rm.className = "clear"; rm.type = "button"; rm.textContent = "Remove";
+    rm.onclick = () => {
+      state[kind] = null; slot.classList.remove("filled"); out.innerHTML = ""; slot.querySelector("input").value = "";
+      if (kind === "html") { htmlText = null; analyse(); }
+      refresh();
+    };
+    info.append(nm, sz, rm); out.appendChild(info);
+    if (kind === "cover") { const img = new Image(); img.className = "thumb"; img.alt = "Cover preview"; img.src = await readDataURL(file); out.appendChild(img); }
+    if (kind === "html") { htmlText = await readText(file); analyse(); }
+    refresh();
+  }
+
+  document.querySelectorAll(".slot").forEach(slot => {
+    const input = slot.querySelector('input[type="file"]');
+    input.addEventListener("change", () => { if (input.files[0]) accept(slot, input.files[0]); });
+    ["dragenter", "dragover"].forEach(ev => slot.addEventListener(ev, e => { e.preventDefault(); slot.classList.add("drag"); }));
+    ["dragleave", "drop"].forEach(ev => slot.addEventListener(ev, e => { e.preventDefault(); slot.classList.remove("drag"); }));
+    slot.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) accept(slot, f); });
+  });
+
+  function cleanName() {
+    let n = (document.getElementById("fname").value || "merged").trim().replace(/[\\/:*?"<>|]+/g, "-");
+    return /\.html?$/i.test(n) ? n : n + ".html";
+  }
+
+  let downloadsNS = null;
+  const downloadsReady = (window.claude && typeof window.claude.use === "function")
+    ? window.claude.use("downloads").then(ns => (downloadsNS = ns)).catch(() => null) : Promise.resolve(null);
+
+  buildBtn.addEventListener("click", async () => {
+    buildBtn.disabled = true; setStatus("Merging… large videos can take a moment.");
+    try {
+      const blob = new Blob([await buildMerged()], { type: "text/html" });
+      const name = cleanName();
+      await downloadsReady;
+      if (downloadsNS) {
+        try { await downloadsNS.save({ filename: name, data: blob }); setStatus("Saved " + name + " (" + fmt(blob.size) + ").", "ok"); }
+        catch (e) {
+          const c = e && e.code;
+          if (c === "declined") setStatus("Download cancelled. Select Merge and download to try again.");
+          else if (c === "rate_limited") setStatus("A save prompt is already open. Finish it, then try again.", "err");
+          else if (c === "too_large") setStatus("The merged file is too large to save here. Try a shorter or more compressed video.", "err");
+          else setStatus("Couldn't save the file (" + (c || "error") + ").", "err");
+        }
+      } else {
+        const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        setStatus("Downloaded " + name + " (" + fmt(blob.size) + ").", "ok");
+      }
+    } catch (e) { setStatus(e.message || "Something went wrong while merging.", "err"); }
+    finally { refresh(); }
+  });
+
+  prevBtn.addEventListener("click", async () => {
+    prevBtn.disabled = true; setStatus("Building preview…");
+    try {
+      document.getElementById("frame").srcdoc = await buildMerged();
+      const p = document.getElementById("preview"); p.classList.add("show");
+      p.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      setStatus("Preview ready. Click inside it, then use your arrow keys to move between slides.", "ok");
+    } catch (e) { setStatus(e.message || "Couldn't build the preview.", "err"); }
+    finally { prevBtn.disabled = buildBtn.disabled; }
+  });
+
+  refresh();
+})();
+</script>
+</body>
+</html>
