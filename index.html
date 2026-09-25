@@ -149,6 +149,28 @@
     .preview { margin-top: 32px; }
     .preview iframe { height: 60vh; height: 60dvh; }
   }
+  .subject { margin: 14px 0 0; padding: 12px 14px; border: 1.5px solid var(--line); border-radius: 10px; min-width: 0; }
+  .subject legend { font-weight: 600; font-size: .95rem; padding: 0 6px; }
+  .subject .hint { margin: 0 0 8px; }
+  .radios { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+  .radio { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; min-height: 36px; }
+  .radio input { width: 18px; height: 18px; accent-color: var(--ok); margin: 0; }
+
+  .preview-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
+  .pages-panel h3 { margin: 0 0 4px; font-size: 1rem; }
+  .pages-panel .hint { margin: 0 0 12px; color: var(--slate); font-size: .9rem; }
+  .pages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 75vh; overflow-y: auto; }
+  .pg { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; background: var(--card); border: 1.5px solid var(--line); border-radius: 9px; }
+  .pg .n { font-weight: 600; text-align: center; color: var(--slate); }
+  .pg .t { min-width: 0; }
+  .pg .t b { display: block; font-size: .9rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pg .t small { color: var(--slate); font-size: .8rem; }
+  .pg button { font: inherit; font-size: .85rem; padding: 6px 10px; min-height: 34px; border-radius: 7px; cursor: pointer; border: 1.5px solid var(--err); color: var(--err); background: transparent; }
+  .pg button:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; }
+  .pg.off { opacity: .6; border-style: dashed; }
+  .pg.off .t b { text-decoration: line-through; }
+  .pg.off button { border-color: var(--ok); color: var(--ok); }
+  @media (max-width: 820px) { .preview-grid { grid-template-columns: minmax(0, 1fr); } .pages { max-height: none; } }
   @media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
 </style>
 </head>
@@ -188,6 +210,14 @@
             <label class="pick">Choose HTML<input type="file" accept=".html,.htm,text/html"></label>
             <div class="out"></div>
             <div class="detect" id="detect" hidden></div>
+            <fieldset class="subject" id="subject" hidden>
+              <legend>Subject or topic page</legend>
+              <p class="hint">This is the first page of your HTML file.</p>
+              <div class="radios">
+                <label class="radio"><input type="radio" name="subject" value="keep" checked> Keep it</label>
+                <label class="radio"><input type="radio" name="subject" value="remove"> Remove it</label>
+              </div>
+            </fieldset>
             <details class="adv">
               <summary>Slides not detected correctly?</summary>
               <p class="hint">Enter the CSS selector that matches each slide in your file, for example <code>.slide</code> or <code>.deck &gt; section</code>.</p>
@@ -218,7 +248,14 @@
 
   <section class="preview" id="preview">
     <h2>Preview</h2>
-    <iframe id="frame" title="Merged file preview"></iframe>
+    <div class="preview-grid">
+      <iframe id="frame" title="Merged file preview"></iframe>
+      <div class="pages-panel">
+        <h3>Pages</h3>
+        <p class="hint">Remove any page you don't want. Removed pages are left out of the downloaded file.</p>
+        <ol class="pages" id="pages"></ol>
+      </div>
+    </div>
   </section>
 </div>
 
@@ -232,6 +269,11 @@
   const prevBtn = document.getElementById("prev");
   const detectEl = document.getElementById("detect");
   const selectorEl = document.getElementById("selector");
+  const subjectEl = document.getElementById("subject");
+  const pagesEl = document.getElementById("pages");
+  const removed = new Set();   // ids of pages to leave out: "cover", "video", "s0", "s1", ...
+  const fileData = {};         // cached data URLs for the cover and video
+  let previewOpen = false;
 
   /* ---------- helpers ---------- */
   function fmt(b) { return b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB"; }
@@ -297,6 +339,9 @@
     const doc = new DOMParser().parseFromString(htmlText, "text/html");
     detection = detect(doc, selectorEl.value.trim());
     detectEl.hidden = false;
+    [...removed].filter(id => id[0] === "s").forEach(id => removed.delete(id));
+    subjectEl.hidden = detection.type === "error";
+    syncSubject();
     if (detection.type === "error") {
       detectEl.className = "detect bad";
       detectEl.textContent = detection.label;
@@ -312,7 +357,7 @@
     }
     refresh();
   }
-  let t; selectorEl.addEventListener("input", () => { clearTimeout(t); t = setTimeout(analyse, 300); });
+  let t; selectorEl.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { analyse(); if (previewOpen && state.cover && state.video && state.html) renderPreview(); }, 300); });
 
   /* ---------- step 2: build the merged file ---------- */
   const EXTRA_CSS = `
@@ -362,8 +407,20 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     if (!doc.querySelector('meta[name="viewport"]')) { const m = doc.createElement("meta"); m.name = "viewport"; m.content = "width=device-width, initial-scale=1"; doc.head.appendChild(m); }
   }
 
-  async function buildMerged() {
-    const [coverURL, videoRaw] = await Promise.all([readDataURL(state.cover), readDataURL(state.video)]);
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const targetOf = el => (el.namespaceURI === SVG_NS ? el.querySelector("section") || el : el);
+  const SKIP = /^(SCRIPT|STYLE|LINK|META|TEMPLATE|NOSCRIPT|BASE|TITLE)$/;
+
+  function labelOf(el, fallback) {
+    const h = el.querySelector("h1, h2, h3, h4, .title");
+    const txt = ((h || el).textContent || "").replace(/\s+/g, " ").trim();
+    return txt ? (txt.length > 60 ? txt.slice(0, 57) + "…" : txt) : fallback;
+  }
+
+  // Builds the merged document. Returns every page (removed ones flagged) so the
+  // preview can list them; removed pages are taken out of the document itself.
+  async function buildDoc() {
+    const [coverURL, videoRaw] = await Promise.all([fileData.cover, fileData.video]);
     const mime = videoMime(state.video);
     const videoURL = videoRaw.replace(/^data:[^;,]*/, "data:" + mime);
     const imgHTML = '<img src="' + coverURL + '" alt="Cover page">';
@@ -372,23 +429,25 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     const doc = new DOMParser().parseFromString(htmlText, "text/html");
     const d = detect(doc, selectorEl.value.trim());
     if (d.type === "error") throw new Error(d.label);
-
     injectHead(doc, EXTRA_CSS);
 
+    const pages = [];
     if (d.type === "scroll") {
+      const blocks = [...doc.body.children].filter(el => !SKIP.test(el.tagName));
       doc.documentElement.classList.add("mz-scroll");
       const cover = doc.createElement("section"); cover.className = "mz-page mz-slide"; cover.innerHTML = '<div class="mz-fill">' + imgHTML + "</div>";
       const video = doc.createElement("section"); video.className = "mz-page mz-slide"; video.innerHTML = '<div class="mz-fill">' + vidHTML + "</div>";
       doc.body.prepend(cover, video);
+      pages.push({ id: "cover", kind: "Cover image", label: state.cover.name, el: cover },
+                 { id: "video", kind: "Video", label: state.video.name, el: video });
+      blocks.forEach((el, i) => pages.push({ id: "s" + i, kind: i === 0 ? "Subject page" : "Section " + (i + 1), label: labelOf(el, "<" + el.tagName.toLowerCase() + ">"), el }));
     } else {
       const first = d.slides[0];
+      const firstT = targetOf(first);
+      const startClasses = ACTIVE.filter(c => firstT.classList.contains(c) || first.classList.contains(c));
+      const startAttrs = { style: first.getAttribute("style"), hidden: first.hasAttribute("hidden"), aria: first.getAttribute("aria-hidden") };
       const cover = makeSlide(doc, first, d.type, imgHTML);
       const video = makeSlide(doc, first, d.type, vidHTML);
-      // the cover is now the starting slide: take "active" state away from the others
-      [video, first].forEach(el => {
-        const tgts = [el, ...(el.namespaceURI === "http://www.w3.org/2000/svg" ? el.querySelectorAll("section") : [])];
-        tgts.forEach(x => ACTIVE.forEach(c => x.classList.remove(c)));
-      });
       if (d.slides[1]) {
         const s2 = d.slides[1];
         [video, first].forEach(el => {
@@ -407,11 +466,87 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
         cover.dataset.x = x0 - 2 * sx; cover.dataset.y = y0 - 2 * sy;
         video.dataset.x = x0 - sx; video.dataset.y = y0 - sy;
       }
+      d.slides.forEach((el, i) => pages.push({ id: "s" + i, kind: i === 0 ? "Subject page" : "Slide " + (i + 1) + " of your deck", label: labelOf(targetOf(el), "Slide " + (i + 1)), el }));
       first.before(cover, video);
+      pages.unshift({ id: "cover", kind: "Cover image", label: state.cover.name, el: cover },
+                    { id: "video", kind: "Video", label: state.video.name, el: video });
+
+      // whichever page is now first becomes the starting slide
+      const kept = pages.filter(p => !removed.has(p.id));
+      pages.forEach(p => { const t = targetOf(p.el); ACTIVE.forEach(c => { p.el.classList.remove(c); t.classList.remove(c); }); });
+      if (kept[0]) {
+        const el = kept[0].el, t = targetOf(el);
+        startClasses.forEach(c => t.classList.add(c));
+        if (startAttrs.style === null) el.removeAttribute("style"); else el.setAttribute("style", startAttrs.style);
+        if (startAttrs.hidden) el.setAttribute("hidden", ""); else el.removeAttribute("hidden");
+        if (startAttrs.aria === null) el.removeAttribute("aria-hidden"); else el.setAttribute("aria-hidden", startAttrs.aria);
+      }
     }
 
+    pages.forEach(p => { p.removed = removed.has(p.id); if (p.removed) p.el.remove(); });
+    if (!pages.some(p => !p.removed)) throw new Error("Every page is removed. Keep at least one page.");
+
     const sc = doc.createElement("script"); sc.textContent = RUNTIME; doc.body.appendChild(sc);
-    return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+    return { html: "<!DOCTYPE html>\n" + doc.documentElement.outerHTML, pages };
+  }
+
+  async function buildMerged() { return (await buildDoc()).html; }
+
+  /* ---------- subject page option + page list ---------- */
+  function syncSubject() {
+    const v = removed.has("s0") ? "remove" : "keep";
+    subjectEl.querySelectorAll("input").forEach(r => (r.checked = r.value === v));
+  }
+  subjectEl.addEventListener("change", e => {
+    if (e.target.value === "remove") removed.add("s0"); else removed.delete("s0");
+    refresh(); if (previewOpen) renderPreview();
+  });
+
+  function renderPages(pages) {
+    pagesEl.innerHTML = "";
+    let n = 0;
+    pages.forEach(p => {
+      const li = document.createElement("li");
+      li.className = "pg" + (p.removed ? " off" : "");
+      const num = document.createElement("span"); num.className = "n"; num.textContent = p.removed ? "–" : String(++n);
+      const t = document.createElement("span"); t.className = "t";
+      const b = document.createElement("b"); b.textContent = p.label;
+      const sm = document.createElement("small"); sm.textContent = p.kind + (p.removed ? " (removed)" : "");
+      t.append(b, sm);
+      const btn = document.createElement("button"); btn.type = "button"; btn.dataset.id = p.id;
+      btn.textContent = p.removed ? "Restore" : "Remove";
+      btn.setAttribute("aria-label", (p.removed ? "Restore " : "Remove ") + p.label);
+      btn.onclick = () => {
+        if (removed.has(p.id)) removed.delete(p.id); else removed.add(p.id);
+        syncSubject(); refresh(); renderPreview(p.id);
+      };
+      li.append(num, t, btn);
+      pagesEl.appendChild(li);
+    });
+  }
+
+  let renderToken = 0;
+  async function renderPreview(focusId) {
+    const my = ++renderToken;
+    try {
+      const { html, pages } = await buildDoc();
+      if (my !== renderToken) return;
+      document.getElementById("frame").srcdoc = html;
+      renderPages(pages);
+      const kept = pages.filter(p => !p.removed).length;
+      setStatus("Preview updated: " + kept + " page" + (kept === 1 ? "" : "s") + " in the file.", "ok");
+    } catch (e) {
+      if (my !== renderToken) return;
+      setStatus(e.message || "Couldn't build the preview.", "err");
+      // still show the list so a removed page can be restored
+      if (/Every page is removed/.test(e.message || "")) {
+        [...pagesEl.querySelectorAll(".pg")].forEach(li => { li.classList.add("off"); li.querySelector(".n").textContent = "–"; const b = li.querySelector("button"); b.textContent = "Restore"; });
+      }
+    }
+    if (focusId) {
+      const hit = pagesEl.querySelector('button[data-id="' + focusId + '"]');
+      if (hit) hit.focus({ preventScroll: true });
+    }
   }
 
   /* ---------- UI ---------- */
@@ -424,13 +559,13 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     else setStatus("Ready to merge.");
     const slides = detection && detection.slides;
     const names = slides
-      ? { cover: "Slide 1: cover", video: "Slide 2: video", html: "Slides 3 to " + (slides.length + 2) + ": your deck" }
-      : { cover: "Page 1: cover", video: "Page 2: video", html: "Then: your page" };
+      ? { cover: "Cover slide", video: "Video slide", html: "Your deck: " + (slides.length - [...removed].filter(id => id[0] === "s").length) + " of " + slides.length + " slides" }
+      : { cover: "Cover page", video: "Video page", html: removed.has("s0") ? "Your page (subject removed)" : "Your page" };
     for (const k of ["cover", "video", "html"]) {
       const s = document.getElementById("s-" + k);
-      s.classList.toggle("on", !!state[k]);
+      s.classList.toggle("on", !!state[k] && !removed.has(k));
       s.querySelector("b").textContent = names[k];
-      s.querySelector("span").textContent = state[k] ? state[k].name : "Not added";
+      s.querySelector("span").textContent = !state[k] ? "Not added" : removed.has(k) ? "Removed" : state[k].name;
     }
   }
 
@@ -438,19 +573,21 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     const kind = slot.dataset.kind, out = slot.querySelector(".out");
     if (!validFor(kind, file)) { setStatus(file.name + " isn't a valid " + (kind === "html" ? "HTML" : kind) + " file. Choose a different one.", "err"); return; }
     state[kind] = file; slot.classList.add("filled"); out.innerHTML = "";
+    if (kind !== "html") { fileData[kind] = readDataURL(file); removed.delete(kind); }
     const info = document.createElement("div"); info.className = "fileinfo";
     const nm = document.createElement("span"); nm.className = "name"; nm.textContent = file.name;
     const sz = document.createElement("span"); sz.className = "size"; sz.textContent = fmt(file.size);
     const rm = document.createElement("button"); rm.className = "clear"; rm.type = "button"; rm.textContent = "Remove";
     rm.onclick = () => {
       state[kind] = null; slot.classList.remove("filled"); out.innerHTML = ""; slot.querySelector("input").value = "";
-      if (kind === "html") { htmlText = null; analyse(); }
+      if (kind === "html") { htmlText = null; subjectEl.hidden = true; analyse(); }
       refresh();
     };
     info.append(nm, sz, rm); out.appendChild(info);
-    if (kind === "cover") { const img = new Image(); img.className = "thumb"; img.alt = "Cover preview"; img.src = await readDataURL(file); out.appendChild(img); }
+    if (kind === "cover") { const img = new Image(); img.className = "thumb"; img.alt = "Cover preview"; img.src = await fileData.cover; out.appendChild(img); }
     if (kind === "html") { htmlText = await readText(file); analyse(); }
     refresh();
+    if (previewOpen && state.cover && state.video && state.html) renderPreview();
   }
 
   document.querySelectorAll(".slot").forEach(slot => {
@@ -496,13 +633,11 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
 
   prevBtn.addEventListener("click", async () => {
     prevBtn.disabled = true; setStatus("Building preview…");
-    try {
-      document.getElementById("frame").srcdoc = await buildMerged();
-      const p = document.getElementById("preview"); p.classList.add("show");
-      p.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-      setStatus("Preview ready. Click inside it, then use your arrow keys to move between slides.", "ok");
-    } catch (e) { setStatus(e.message || "Couldn't build the preview.", "err"); }
-    finally { prevBtn.disabled = buildBtn.disabled; }
+    previewOpen = true;
+    const p = document.getElementById("preview"); p.classList.add("show");
+    await renderPreview();
+    p.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    prevBtn.disabled = buildBtn.disabled;
   });
 
   refresh();
