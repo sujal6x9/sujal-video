@@ -417,6 +417,389 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     return txt ? (txt.length > 60 ? txt.slice(0, 57) + "…" : txt) : fallback;
   }
 
+  /* ---------- slide dots / page indicators ---------- */
+  // A deck's dots are usually a row of small, text-less siblings whose count
+  // matches the slide count. When cover and video are added, they need two more.
+  const DOT_HINT = /dot|indicator|bullet|pagin|pager|progress|nav|step|pip|marker|thumb/i;
+  const nameOf = el => ((el.getAttribute && el.getAttribute("class")) || "") + " " + (el.id || "") + " " + ((el.getAttribute && el.getAttribute("aria-label")) || "");
+  const kidsOf = el => [...el.children].filter(c => !SKIP.test(c.tagName));
+  const isOn = el => ACTIVE.some(c => el.classList.contains(c)) || el.getAttribute("aria-current") === "true" || el.getAttribute("aria-current") === "step" || el.getAttribute("aria-selected") === "true";
+
+  function dotKids(el) {
+    const k = kidsOf(el);
+    if (k.length < 2) return null;
+    const tag = k[0].tagName;
+    for (const c of k) {
+      if (c.tagName !== tag) return null;
+      if ((c.textContent || "").trim().length > 3) return null;
+      if (c.querySelectorAll("*").length > 4) return null;
+    }
+    return DOT_HINT.test(nameOf(el)) || DOT_HINT.test(nameOf(k[0])) ? k : null;
+  }
+
+  function findDotGroups(doc, slides) {
+    const out = [];
+    doc.body.querySelectorAll("*").forEach(el => {
+      if (SKIP.test(el.tagName)) return;
+      if (slides.some(s => s.contains(el) || el.contains(s))) return;
+      const k = dotKids(el);
+      if (k && k.length === slides.length && !out.some(g => g.el.contains(el) || el.contains(g.el))) out.push({ el, kids: k });
+    });
+    return out;
+  }
+
+  // Replaces the number `from` with `to` in an element's attributes (and in its
+  // text, when the dot shows just a number), so goTo(2), data-index="2",
+  // aria-label="Slide 3" and similar keep pointing at the right slide.
+  function renumber(root, from, to) {
+    [root, ...root.querySelectorAll("*")].forEach(el => {
+      [...el.attributes].forEach(a => {
+        if (/^(class|style|href|src)$/.test(a.name)) return;
+        const v = a.value.replace(/\d+/g, m => (+m === from ? String(to) : m));
+        if (v !== a.value) el.setAttribute(a.name, v);
+      });
+      if (!el.children.length) {
+        const t = (el.textContent || "").trim();
+        if (/^\d+$/.test(t) && +t === from) el.textContent = el.textContent.replace(t, t.length > 1 && t[0] === "0" ? String(to).padStart(t.length, "0") : String(to));
+      }
+    });
+  }
+
+  function numbersIn(el) {
+    const out = [];
+    [el, ...el.querySelectorAll("*")].forEach(x => {
+      [...x.attributes].forEach(a => { if (!/^(class|style|href|src)$/.test(a.name)) out.push(...(a.value.match(/\d+/g) || [])); });
+      if (!x.children.length) out.push(...(((x.textContent || "").trim().match(/^\d+$/)) || []));
+    });
+    return out.map(Number);
+  }
+
+  // Rebuilds one dot row so it has one dot per page in the merged file.
+  function rebuildDots(group, pages) {
+    const { el, kids } = group;
+    const onCls = [...new Set(kids.flatMap(k => ACTIVE.filter(c => k.classList.contains(c))))];
+    const ariaCur = kids.map(k => k.getAttribute("aria-current")).find(v => v && v !== "false");
+    const ariaSel = kids.some(k => k.hasAttribute("aria-selected"));
+    const tplIdx = Math.max(0, kids.findIndex(k => !isOn(k)));
+    const tpl = kids[tplIdx];
+    const n0 = numbersIn(kids[0]);
+    const base = n0.includes(0) ? 0 : n0.includes(1) ? 1 : 0;
+
+    const list = pages.filter(p => !p.removed).map(p => {
+      if (p.id[0] === "s") return { node: kids[+p.id.slice(1)], j: +p.id.slice(1) };
+      const c = tpl.cloneNode(true);
+      [c, ...c.querySelectorAll("[id]")].forEach(x => { if (x.id && !/\d/.test(x.id)) x.removeAttribute("id"); });
+      return { node: c, j: tplIdx };
+    });
+    kids.forEach(k => k.remove());
+    list.forEach((it, n) => {
+      renumber(it.node, it.j + base, n + base);
+      ACTIVE.forEach(c => it.node.classList.remove(c));
+      it.node.removeAttribute("aria-current");
+      if (ariaSel) it.node.setAttribute("aria-selected", "false");
+      el.appendChild(it.node);
+    });
+    if (list[0]) {
+      onCls.forEach(c => list[0].node.classList.add(c));
+      if (ariaCur) list[0].node.setAttribute("aria-current", ariaCur);
+      if (ariaSel) list[0].node.setAttribute("aria-selected", "true");
+    }
+    el.setAttribute("data-mz-dots", "");
+    if (onCls[0]) el.setAttribute("data-mz-dot-active", onCls[0]);
+  }
+
+  // Decks that store the slide count as a constant (const totalSlides = 5)
+  // get the new count, so navigation and dots reach every page.
+  function patchCounts(doc, from, to) {
+    if (from === to) return;
+    const re = /\b(totalSlides|total_slides|TOTAL_SLIDES|slideCount|slide_count|SLIDE_COUNT|slidesCount|numSlides|num_slides|NUM_SLIDES|numberOfSlides|maxSlides|slideTotal|totalPages|pageCount|TOTAL|total)(\s*[:=]\s*)(\d+)\b(?!\s*[-+*\/.\d])/g;
+    doc.querySelectorAll("script:not([src])").forEach(s => {
+      const t = s.textContent.replace(re, (m, name, eq, num) => (+num === from ? name + eq + to : m));
+      if (t !== s.textContent) s.textContent = t;
+    });
+  }
+
+  // Runs inside the merged file. Handles dots and "3 / 7" counters that the
+  // deck builds with JavaScript from its old slide count, keeps the right dot
+  // highlighted, and makes every dot open its own page.
+  function mzDots(C) {
+    var ACT = C.act, HINT = /dot|indicator|bullet|pagin|pager|progress|nav|step|pip|marker|thumb/i;
+    var SKIPT = /^(SCRIPT|STYLE|LINK|META|TEMPLATE|NOSCRIPT|BASE|TITLE)$/;
+    var groups = [], counters = [], navToken = 0, queued = false, dotOff = null;
+    var slice = function (l) { return Array.prototype.slice.call(l); };
+    function pages() { return slice(document.querySelectorAll("[data-mz-page]")); }
+    function kids(el) { return slice(el.children).filter(function (c) { return !SKIPT.test(c.tagName); }); }
+    function nm(el) { return (el.getAttribute("class") || "") + " " + (el.id || "") + " " + (el.getAttribute("aria-label") || ""); }
+    function inPage(el) { return pages().some(function (p) { return p.contains(el) || el.contains(p); }); }
+    function shown(el) {
+      if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+      var cs = getComputedStyle(el); return cs.visibility !== "hidden" && +cs.opacity > 0.05;
+    }
+    function seen(el) {
+      var r = el.getBoundingClientRect();
+      var w = Math.min(r.right, innerWidth) - Math.max(r.left, 0), h = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0);
+      return w <= 0 || h <= 0 || !shown(el) ? 0 : (w * h) / (innerWidth * innerHeight);
+    }
+    // The deck's own "25 / 26" counter is the most reliable record of how many
+    // slides it really has and which one is showing, even if the merge tool
+    // didn't recognise every slide.
+    var truth = [];
+    function readTruth() {
+      for (var i = 0; i < truth.length; i++) {
+        if (!document.contains(truth[i])) continue;
+        var m = (truth[i].textContent || "").match(/^\s*(\d+)\s*(?:\/|of)\s*(\d+)\s*$/i);
+        if (m && +m[2] >= C.total && +m[2] <= C.total + 3 && +m[1] >= 1 && +m[1] <= +m[2]) return { a: +m[1], b: +m[2] };
+      }
+      return null;
+    }
+    function total() { var t = readTruth(); return t ? t.b : C.total; }
+    function current() {
+      var t = readTruth();
+      if (t) return { i: t.a - 1, sure: true, deck: true };
+      // a single page marked active by the deck is current right away, even
+      // while it is still fading in
+      var ps = pages(), on = [];
+      ps.forEach(function (p, i) { var x = p.namespaceURI === "http://www.w3.org/2000/svg" ? (p.querySelector("section") || p) : p;
+        if (ACT.some(function (c) { return p.classList.contains(c) || x.classList.contains(c); })) on.push(i); });
+      if (on.length === 1) return { i: on[0], sure: true };
+      var best = -1, ba = 0, n = 0;
+      pages().forEach(function (p, i) { var a = seen(p); if (a > 0.5) n++; if (a > ba) { ba = a; best = i; } });
+      return { i: best, sure: best >= 0 && ba > 0.5 && n === 1 };
+    }
+    function dotLike(el) {
+      var k = kids(el); if (k.length < 2) return null;
+      for (var i = 0; i < k.length; i++) {
+        var c = k[i], r = c.getBoundingClientRect();
+        if (c.tagName !== k[0].tagName || (c.textContent || "").trim().length > 3 || c.querySelectorAll("*").length > 4 || r.width > 80 || r.height > 80) return null;
+      }
+      if (HINT.test(nm(el)) || HINT.test(nm(k[0]))) return k;
+      // unnamed rows: accept a run of empty, identical markers in a fixed bar
+      if (k.length >= 5 && k.every(function (c) { return !(c.textContent || "").trim(); }) && inFixed(el)) return k;
+      return null;
+    }
+    function inFixed(el) {
+      for (var p = el; p && p !== document.body; p = p.parentElement) { var pos = getComputedStyle(p).position; if (pos === "fixed" || pos === "sticky") return true; }
+      return false;
+    }
+    // The class that marks the current dot: a known name ("active", "on", ...),
+    // or else the one class that exactly one dot has and the others don't.
+    var DOT_ON = ACT.concat(["on", "is-on", "cur", "now", "dot-active", "active-dot", "highlight", "filled"]);
+    // Remembered across rows, because a rebuilt row may have no current dot yet
+    // (for example on a slide the deck itself had no dot for).
+    var learned = null;
+    function onCls(k) {
+      for (var i = 0; i < k.length; i++) for (var j = 0; j < DOT_ON.length; j++) if (k[i].classList.contains(DOT_ON[j])) return (learned = DOT_ON[j]);
+      var count = {};
+      k.forEach(function (d) { slice(d.classList).forEach(function (c) { count[c] = (count[c] || 0) + 1; }); });
+      if (k.length > 2) for (var c in count) if (count[c] === 1) return (learned = c);
+      return learned;
+    }
+    function isOn(d, g) { return (g.cls && d.classList.contains(g.cls)) || (g.aria && d.getAttribute(g.aria) === "true"); }
+    // A row is wrong when it matches the deck's old slide count, or when it comes
+    // up a few dots short of the real page count (decks that count "slides - 1",
+    // skip the title slide, or use a fixed number).
+    function wrongCount(n) { var T = total(); return n !== T && (n === C.orig || n === C.keptUser || (n < T && n >= T - 3)); }
+
+    function fixGroup(g) {
+      var k = kids(g.el); if (!wrongCount(k.length)) return;
+      g.fixing = true;
+      if (!g.cls) g.cls = onCls(k);
+      var deckOn = g.cls ? k.filter(function (d) { return d.classList.contains(g.cls); })[0] : null;
+      var nowAt = current();
+      var tpl = k.filter(function (d) { return !isOn(d, g); })[0] || k[0];
+      var deckCounts = !!readTruth();
+      if (!deckCounts && k.length === C.orig && C.removedUser.length) {
+        C.removedUser.slice().sort(function (a, b) { return b - a; }).forEach(function (i) { if (k[i]) k[i].remove(); });
+        k = kids(g.el);
+      }
+      // Old-count rows are missing the cover and video dots at the front;
+      // rows built from the live slide list are missing dots at the end.
+      var add = total() - k.length, first = !deckCounts && (k.length === C.orig || k.length === C.keptUser) ? k[0] : null;
+      for (var i = 0; i < add; i++) {
+        var c = tpl.cloneNode(true);
+        [c].concat(slice(c.querySelectorAll("[id]"))).forEach(function (x) { x.removeAttribute("id"); });
+        ACT.forEach(function (a) { c.classList.remove(a); });
+        c.removeAttribute("aria-current");
+        c.setAttribute("data-mz-clone", "");
+        g.el.insertBefore(c, first);
+      }
+      for (i = add; i < 0; i++) { var ks = kids(g.el); ks[ks.length - 1].remove(); }
+      kids(g.el).forEach(function (d, n) {
+        var l = d.getAttribute("aria-label"); if (l && /\d+/.test(l)) d.setAttribute("aria-label", l.replace(/\d+/, String(n + 1)));
+        if (!d.children.length && /^\s*\d+\s*$/.test(d.textContent)) d.textContent = String(n + 1);
+      });
+      // The deck highlighted its dot for the current slide; where that dot sits
+      // now tells us how the deck's dots line up with the slides.
+      if (deckOn && document.contains(deckOn) && nowAt.sure && nowAt.i >= 0) dotOff = nowAt.i - kids(g.el).indexOf(deckOn);
+      g.mode = "runtime"; g.fixing = false;
+    }
+
+    function register(el, mode) {
+      if (groups.some(function (g) { return g.el === el; })) return;
+      var k = kids(el);
+      var g = { el: el, mode: mode, cls: el.getAttribute("data-mz-dot-active") || onCls(k),
+        aria: k.some(function (d) { return d.hasAttribute("aria-current"); }) ? "aria-current" : k.some(function (d) { return d.hasAttribute("aria-selected"); }) ? "aria-selected" : null };
+      groups.push(g);
+      fixGroup(g);
+      el.addEventListener("click", function (ev) {
+        if (g.pass) return;
+        var ks = kids(el), d = ks.filter(function (c) { return c === ev.target || c.contains(ev.target); })[0];
+        if (!d) return;
+        var t = ks.indexOf(d);
+        navToken++;
+        // Trigger the deck's own dot that really opens slide t (the deck's dots
+        // can be shifted by the added cover and video), then finish any
+        // remaining step in the same moment, so no in-between slide is drawn.
+        ev.preventDefault(); ev.stopImmediatePropagation();
+        var real = ks.filter(function (x) { return !x.hasAttribute("data-mz-clone"); });
+        if (!real.length) return go(t);
+        var q = t - (dotOff || 0);
+        var pick = ks[q] && !ks[q].hasAttribute("data-mz-clone") ? ks[q]
+          : real.reduce(function (a, b) { return Math.abs(ks.indexOf(b) - q) < Math.abs(ks.indexOf(a) - q) ? b : a; });
+        var before = current().i;
+        g.pass = true; try { pick.click(); } finally { g.pass = false; }
+        var after = current();
+        if (after.i !== before && after.i >= 0) dotOff = after.i - ks.indexOf(pick);
+        if (after.i === t) return;
+        if (!jumpSync(t)) waitStable(function (i) { if (i !== t) go(t); });
+      }, true);
+      new MutationObserver(function () {
+        if (g.fixing) return;
+        if (wrongCount(kids(el).length)) fixGroup(g);
+        if (!g.cls) g.cls = onCls(kids(el));
+        schedule();
+      }).observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "aria-current", "aria-selected"] });
+    }
+
+    function scan() {
+      scanQueued = false;
+      // forget rows and counters the deck has thrown away
+      groups = groups.filter(function (g) { return document.contains(g.el); });
+      counters = counters.filter(function (c) { return document.contains(c.el); });
+      truth = truth.filter(function (el) { return document.contains(el); });
+      var all = slice(document.body.querySelectorAll("*"));
+      // read the deck's counter first, so a freshly rebuilt dot row is judged
+      // against the real slide count
+      all.forEach(function (el) {
+        if (el.children.length || SKIPT.test(el.tagName)) return;
+        var m = (el.textContent || "").match(/^\s*(\d+)\s*(?:\/|of)\s*(\d+)\s*$/i);
+        if (m && +m[2] > C.total && +m[2] <= C.total + 3 && truth.indexOf(el) < 0 && !inPage(el)) truth.push(el);
+      });
+      all.forEach(function (el) {
+        if (SKIPT.test(el.tagName) || el.hasAttribute("data-mz-dots")) return;
+        if (groups.some(function (g) { return g.el.contains(el) || el.contains(g.el); })) return;
+        if (!el.children.length) {
+          var m = (el.textContent || "").match(/^(\s*)(\d+)(\s*(?:\/|of)\s*)(\d+)(\s*)$/i);
+          if (m && wrongCount(+m[4]) && !inPage(el) && !counters.some(function (c) { return c.el === el; }))
+            counters.push({ el: el, pad: m[2].length > 1 && m[2][0] === "0" ? m[2].length : 0, sep: m[3], pre: m[1], post: m[5] });
+          return;
+        }
+        if (!HINT.test(nm(el)) && !HINT.test(nm(el.firstElementChild)) && !(el.children.length >= 5 && !(el.firstElementChild.textContent || "").trim())) return;
+        var k = dotLike(el);
+        if (k && wrongCount(k.length) && !inPage(el)) register(el, "runtime");
+      });
+    }
+
+    function pad(n, w) { n = String(n); while (n.length < w) n = "0" + n; return n; }
+    function sync() {
+      queued = false;
+      var c = current(); if (!c.sure) return;
+      groups.forEach(function (g) {
+        if (!document.contains(g.el)) return;
+        var k = kids(g.el); if (k.length !== total()) return;
+        if (!g.cls) g.cls = onCls(k);
+        k.forEach(function (d, i) {
+          var on = i === c.i;
+          if (g.cls && d.classList.contains(g.cls) !== on) d.classList.toggle(g.cls, on);
+          if (g.aria && (d.getAttribute(g.aria) === "true") !== on) d.setAttribute(g.aria, on ? "true" : "false");
+        });
+      });
+      counters.forEach(function (o) {
+        var t = o.pre + pad(c.i + 1, o.pad) + o.sep + pad(total(), o.pad) + o.post;
+        if (document.contains(o.el) && o.el.textContent !== t) o.el.textContent = t;
+      });
+    }
+    function schedule() { if (!queued) { queued = true; requestAnimationFrame(sync); } }
+
+    function waitStable(cb) {
+      var last = -2, same = 0, t0 = Date.now();
+      (function p() {
+        var c = current();
+        if (c.sure && c.i === last) { if (++same >= 3) return cb(c.i); } else same = 0;
+        last = c.i;
+        if (Date.now() - t0 > 3000) return cb(c.i);
+        setTimeout(p, 100);
+      })();
+    }
+    function scroller(el) {
+      for (var p = el.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+        var cs = getComputedStyle(p);
+        if (/(auto|scroll)/.test(cs.overflowY + cs.overflowX) && (p.scrollHeight > p.clientHeight + 2 || p.scrollWidth > p.clientWidth + 2)) return true;
+      }
+      var se = document.scrollingElement || document.documentElement;
+      return se.scrollHeight > innerHeight + 2 && getComputedStyle(document.body).overflowY !== "hidden" && getComputedStyle(document.documentElement).overflowY !== "hidden";
+    }
+    var KEYS = [["keydown", "ArrowRight", "ArrowLeft", 39, 37], ["keyup", "ArrowRight", "ArrowLeft", 39, 37], ["keydown", "PageDown", "PageUp", 34, 33], ["keydown", "ArrowDown", "ArrowUp", 40, 38]], kw = 0;
+    function key(type, name, code) {
+      var e = new KeyboardEvent(type, { key: name, code: name, bubbles: true, cancelable: true });
+      try { Object.defineProperty(e, "keyCode", { get: function () { return code; } }); Object.defineProperty(e, "which", { get: function () { return code; } }); } catch (x) {}
+      (document.body || document).dispatchEvent(e);
+    }
+    // Steps with the arrow key inside one task. Decks that switch slides
+    // straight away reach the target before the browser draws anything.
+    function jumpSync(t) {
+      var K = KEYS[kw];
+      for (var n = 0; n < 80; n++) {
+        var c = current(); if (c.i === t) return true;
+        var fwd = c.i < t; key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
+        if (current().i === c.i) return false;
+      }
+      return current().i === t;
+    }
+    function steps(t) {
+      if (jumpSync(t)) return;
+      var token = ++navToken, tries = 0, fails = 0;
+      (function one() {
+        if (token !== navToken) return;
+        var c = current(); if (c.i === t || tries++ > 80) return;
+        var fwd = c.i < t, K = KEYS[kw], start = c.i, waited = 0;
+        key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
+        (function poll() {
+          if (token !== navToken) return;
+          var n = current();
+          if (n.i !== start && n.i >= 0) { fails = 0; return setTimeout(one, 40); }
+          if ((waited += 60) > 900) { if (++fails >= KEYS.length) return; kw = (kw + 1) % KEYS.length; return one(); }
+          setTimeout(poll, 60);
+        })();
+      })();
+    }
+    function go(t) {
+      var ps = pages(), c = current(); if (t < 0 || t >= total() || c.i === t) return;
+      if (!c.deck && ps[t] && scroller(ps[t])) {
+        ps[t].scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start", inline: "start" });
+        waitStable(function (i) { if (i !== t) steps(t); });
+      } else steps(t);
+    }
+
+    function boot() {
+      slice(document.querySelectorAll("[data-mz-dots]")).forEach(function (el) { register(el, "build"); });
+      scan(); sync();
+    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
+    addEventListener("load", function () { scan(); sync(); });
+    // Decks often rebuild their dot bar while you move through the slides, so
+    // keep watching for new dot rows for as long as the file is open.
+    var scanQueued = false;
+    function queueScan() { if (!scanQueued) { scanQueued = true; setTimeout(function () { scan(); sync(); }, 30); } }
+    new MutationObserver(function (list) {
+      for (var i = 0; i < list.length; i++) if (list[i].addedNodes.length) return queueScan();
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    setInterval(sync, 250);
+    setInterval(queueScan, 1000);
+    addEventListener("scroll", schedule, true);
+    ["keydown", "click", "wheel", "touchend"].forEach(function (e) { addEventListener(e, function () { setTimeout(schedule, 60); }, true); });
+  }
+
   // Builds the merged document. Returns every page (removed ones flagged) so the
   // preview can list them; removed pages are taken out of the document itself.
   async function buildDoc() {
@@ -430,6 +813,7 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     const d = detect(doc, selectorEl.value.trim());
     if (d.type === "error") throw new Error(d.label);
     injectHead(doc, EXTRA_CSS);
+    const dotGroups = d.type === "scroll" ? [] : findDotGroups(doc, d.slides);
 
     const pages = [];
     if (d.type === "scroll") {
@@ -487,6 +871,17 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     if (!pages.some(p => !p.removed)) throw new Error("Every page is removed. Keep at least one page.");
 
     const sc = doc.createElement("script"); sc.textContent = RUNTIME; doc.body.appendChild(sc);
+    if (d.type !== "scroll") {
+      const kept = pages.filter(p => !p.removed);
+      kept.forEach((p, i) => p.el.setAttribute("data-mz-page", String(i)));
+      dotGroups.forEach(g => rebuildDots(g, pages));
+      const removedUser = pages.filter(p => p.removed && p.id[0] === "s").map(p => +p.id.slice(1));
+      patchCounts(doc, d.slides.length, kept.length);
+      const cfg = { total: kept.length, orig: d.slides.length, keptUser: d.slides.length - removedUser.length, removedUser, act: ACTIVE };
+      const ds = doc.createElement("script");
+      ds.textContent = "(" + mzDots.toString() + ")(" + JSON.stringify(cfg) + ");";
+      doc.body.appendChild(ds);
+    }
     return { html: "<!DOCTYPE html>\n" + doc.documentElement.outerHTML, pages };
   }
 
