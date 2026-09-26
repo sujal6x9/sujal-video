@@ -537,7 +537,7 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
   function mzDots(C) {
     var ACT = C.act, HINT = /dot|indicator|bullet|pagin|pager|progress|nav|step|pip|marker|thumb/i;
     var SKIPT = /^(SCRIPT|STYLE|LINK|META|TEMPLATE|NOSCRIPT|BASE|TITLE)$/;
-    var groups = [], counters = [], navToken = 0, queued = false, syncKeys = null;
+    var groups = [], counters = [], navToken = 0, queued = false;
     var slice = function (l) { return Array.prototype.slice.call(l); };
     function pages() { return slice(document.querySelectorAll("[data-mz-page]")); }
     function kids(el) { return slice(el.children).filter(function (c) { return !SKIPT.test(c.tagName); }); }
@@ -573,7 +573,7 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
       var ps = pages(), on = [];
       ps.forEach(function (p, i) { var x = p.namespaceURI === "http://www.w3.org/2000/svg" ? (p.querySelector("section") || p) : p;
         if (ACT.some(function (c) { return p.classList.contains(c) || x.classList.contains(c); })) on.push(i); });
-      if (on.length === 1) return { i: on[0], sure: true };
+      if (on.length === 1) return { i: on[0], sure: true, cls: true };
       var best = -1, ba = 0, n = 0;
       pages().forEach(function (p, i) { var a = seen(p); if (a > 0.5) n++; if (a > ba) { ba = a; best = i; } });
       return { i: best, sure: best >= 0 && ba > 0.5 && n === 1 };
@@ -700,29 +700,49 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
         var t = ks.indexOf(d);
         ev.preventDefault(); ev.stopImmediatePropagation();
         var token = ++navToken, start = current(), before = start.sure ? start.i : -1;
+        release();
         if (start.sure && start.i === t) return;
-        var pick = pageOf(g, d) === t ? d : dotFor(g, ks, t, before, null), tried = [];
-        // Everything below up to waitStable runs in one go, before the browser
-        // draws, so a dot that opens the wrong page is corrected unseen.
-        var pending = false;
+        // Everything up to waitStable runs in one go, before the browser draws,
+        // so a wrong turn is corrected unseen.
+        var snap = start.sure ? snapshot(before) : null;
+        if (snap) snap.cls = !!start.cls;
+        function click(x) { var hit = spotIn(d, ev.target, x); g.pass = true; try { hit.click(); } finally { g.pass = false; } }
+        // 1. a dot of the deck's own that opens page t
+        var pick = pageOf(g, d) === t ? d : dotFor(g, ks, t, -1, null), tried = [], pending = false, now = before;
         for (var n = 0; pick && n < 3; n++) {
           tried.push(pick); pending = true;
-          var hit = spotIn(d, ev.target, pick);
-          g.pass = true; try { hit.click(); } finally { g.pass = false; }
+          click(pick);
           var after = current();
-          if (!(after.sure && after.i >= 0 && after.i !== before)) break;   // not switched yet (animating) or ignored
-          learn(g, pick, after.i); before = after.i; pending = false;
-          if (after.i === t) return;
-          pick = dotFor(g, ks, t, before, null);
+          if (!(after.sure && after.i >= 0 && after.i !== now)) break;   // still animating there, or busy
+          learn(g, pick, after.i); now = after.i; pending = false;
+          if (after.i === t) return schedule();
+          pick = dotFor(g, ks, t, -1, null);
           if (pick && tried.indexOf(pick) >= 0) pick = null;
         }
-        // keys only when no dot click may still be taking effect
-        if (!pending && current().sure && jumpSync(t)) return;
-        var last = tried[tried.length - 1], was = before;
+        if (!pending) {
+          // 2. no such dot: the deck's own "go to slide" function
+          var r = callNav(t);
+          if (r === "reached") return schedule();
+          if (r === "called") pending = true;
+          else {
+            // 3. last resort: hide the pages in between, hop with the closest
+            // dot on the way, then arrow keys
+            hold(snap, t);
+            var hop = dotFor(g, ks, t, now, null);
+            if (hop) {
+              tried.push(hop); click(hop);
+              var h = current();
+              if (h.sure && h.i >= 0 && h.i !== now) { learn(g, hop, h.i); now = h.i; } else pending = true;
+            }
+            if (!pending && jumpInstant(t)) return finish(token);
+          }
+        }
+        var last = tried[tried.length - 1], was = now;
         waitStable(function (i) {
           if (token !== navToken) return;
-          if (last && i >= 0 && i !== was) learn(g, last, i);
-          if (i !== t) go(t);
+          if (last && i >= 0 && i !== was && !g.map.has(last)) learn(g, last, i);
+          if (i === t) return finish(token);
+          go(t, token);
         });
       }, true);
       new MutationObserver(function () {
@@ -765,7 +785,9 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     function pad(n, w) { n = String(n); while (n.length < w) n = "0" + n; return n; }
     function sync() {
       queued = false;
-      var c = current(); if (!c.sure) return;
+      var c = current();
+      if (navTarget != null) c = { i: navTarget, sure: true };
+      if (!c.sure) return;
       groups.forEach(function (g) {
         if (!document.contains(g.el)) return;
         var k = kids(g.el); if (k.length !== total()) return;
@@ -815,51 +837,157 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
       try { Object.defineProperty(e, "keyCode", { get: function () { return code; } }); Object.defineProperty(e, "which", { get: function () { return code; } }); } catch (x) {}
       (document.body || document).dispatchEvent(e);
     }
-    // Steps with the arrow key inside one task, for decks that switch slides
-    // straight away, so the target is reached before the browser draws anything.
-    // Decks that animate don't switch straight away: after the first key shows
-    // that, this is never tried again, because a key is then still in flight
-    // and pressing more would overshoot.
-    function jumpSync(t) {
-      if (syncKeys === false) return false;
-      var K = KEYS[kw];
-      for (var n = 0; n < 80; n++) {
-        var c = current(); if (c.i === t) return true;
-        if (!c.sure || c.i < 0) return false;
-        var fwd = c.i < t; key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
-        var now = current();
-        if (now.i === c.i) { syncKeys = false; return false; }
-        syncKeys = true;
-      }
-      return current().i === t;
+    /* ---- getting to a page without showing the pages in between ---- */
+    var mzCss = null, navTarget = null, held = null;
+    function css() {
+      if (mzCss && document.contains(mzCss)) return;
+      mzCss = document.createElement("style");
+      mzCss.textContent = "html.mz-instant *,html.mz-instant *::before,html.mz-instant *::after{transition:none!important;animation-duration:0s!important;animation-delay:0s!important;scroll-behavior:auto!important}" +
+        "[data-mz-veil]{clip-path:inset(0 0 100% 0)!important}";
+      (document.head || document.documentElement).appendChild(mzCss);
     }
-    // One key at a time, each only after the previous slide change has finished.
-    function steps(t) {
-      var token = ++navToken, tries = 0, fails = 0;
+    var PIN = ["opacity", "visibility", "display", "transform", "pointer-events", "z-index"];
+    // How the current page looks right now, taken before anything moves.
+    function snapshot(i) {
+      var p = pages()[i]; if (!p) return null;
+      var cs = getComputedStyle(p), v = {};
+      PIN.forEach(function (k) { v[k] = cs.getPropertyValue(k); });
+      return { el: p, v: v };
+    }
+    // Keeps the page you were on showing and hides every other page except the
+    // target, until the target is reached. Class-based decks only: in decks
+    // that slide a track, the pages move with it and can't be held still.
+    function hold(snap, t) {
+      css(); release();
+      navTarget = t;
+      var ps = pages();
+      ps.forEach(function (p, i) { if (i !== t && (!snap || p !== snap.el)) p.setAttribute("data-mz-veil", ""); });
+      if (snap && snap.cls) {
+        var old = {};
+        PIN.forEach(function (k) { old[k] = [snap.el.style.getPropertyValue(k), snap.el.style.getPropertyPriority(k)]; snap.el.style.setProperty(k, snap.v[k], "important"); });
+        held = { el: snap.el, old: old };
+      }
+      schedule();
+    }
+    function release() {
+      navTarget = null;
+      slice(document.querySelectorAll("[data-mz-veil]")).forEach(function (p) { p.removeAttribute("data-mz-veil"); });
+      if (held) {
+        var h = held; held = null;
+        PIN.forEach(function (k) { h.el.style.removeProperty(k); if (h.old[k][0]) h.el.style.setProperty(k, h.old[k][0], h.old[k][1]); });
+      }
+      schedule();
+    }
+    function finish(token) { if (token === navToken) release(); }
+    // anything you do yourself ends a tool-driven move
+    ["keydown", "wheel", "touchstart"].forEach(function (e) {
+      addEventListener(e, function (ev) { if (ev.isTrusted && navTarget != null) { navToken++; release(); } }, true);
+    });
+
+    // The deck's own "go to slide n" function, found from how its dots call it:
+    // onclick="goToSlide(3)" on a dot, or dot.addEventListener("click", () => goToSlide(i))
+    // in its script. Reached through the page's global scope, so functions
+    // declared with function, let or const at the top of a script all work.
+    var NAV;
+    function navFn() {
+      if (NAV !== undefined) return NAV;
+      NAV = null;
+      var ID = "[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*", cands = [];
+      groups.forEach(function (g) { kids(g.el).forEach(function (d) {
+        if (isMade(d)) return;
+        [d].concat(slice(d.querySelectorAll("[onclick]"))).forEach(function (x) {
+          var m = (x.getAttribute("onclick") || "").match(new RegExp("^\\s*(?:return\\s+)?(" + ID + ")\\s*\\(\\s*(\\d+)\\s*\\)\\s*;?\\s*(?:return\\s+false\\s*;?)?\\s*$"));
+          if (m) cands.push({ name: m[1], n: +m[2], d: d, g: g });
+        });
+      }); });
+      var js = slice(document.querySelectorAll("script:not([src])")).map(function (x) { return x.textContent; }).join("\n");
+      var re = new RegExp("(?:\\.onclick\\s*=|addEventListener\\(\\s*['\"]click['\"]\\s*,)\\s*(?:function\\s*\\([^)]*\\)\\s*\\{\\s*|\\(?\\s*[\\w$]*\\s*\\)?\\s*=>\\s*\\{?\\s*)(" + ID + ")\\s*\\(\\s*(?:i|j|k|n|ix|idx|index|ind|num|slideIndex|dotIndex)\\s*(\\+\\s*1)?\\s*\\)", "g"), m;
+      while ((m = re.exec(js))) cands.push({ name: m[1], plus: !!m[2] });
+      for (var i = 0; i < cands.length; i++) {
+        var c = cands[i], f = null;
+        try {
+          var dot = c.name.lastIndexOf(".");
+          f = new Function("try{var o=" + (dot > 0 ? c.name.slice(0, dot) : "null") + ",f=" + c.name + ";return typeof f==='function'?(o?f.bind(o):f):null}catch(e){return null}")();
+        } catch (e) { f = null; }
+        if (!f) continue;
+        var off = 0;   // fn(a) opens page a + off
+        if (c.d) { var p = pageOf(c.g, c.d); if (p != null) off = p - c.n; }
+        else off = (groups[0] && groups[0].joff || 0) - (c.plus ? 1 : 0);
+        NAV = { f: f, off: off };
+        break;
+      }
+      return NAV;
+    }
+    // "reached": on page t now. "called": asked the deck, still getting there
+    // (or it is busy). "none": no function to call.
+    function callNav(t) {
+      var N = navFn(); if (!N) return "none";
+      var b = current();
+      try { N.f(t - N.off); } catch (e) { NAV = null; return "none"; }
+      var a = current();
+      if (a.sure && a.i === t) return "reached";
+      if (a.sure && b.sure && a.i >= 0 && a.i !== b.i) {
+        // it opened another page: that shows how its numbers line up, so correct
+        // straight away, before anything is drawn
+        N.off = a.i - (t - N.off);
+        try { N.f(t - N.off); } catch (e) {}
+        if (current().i === t) return "reached";
+      }
+      return "called";
+    }
+    // Steps with the arrow key inside one task. In decks that slide a track,
+    // animations are switched off meanwhile, so each key lands at once and the
+    // target shows up without the pages in between being drawn. Returns false
+    // when a key didn't take effect at once: it may still be on its way, so the
+    // caller waits for the deck to settle before doing anything else.
+    function jumpInstant(t) {
+      var c = current(); if (c.i === t) return true;
+      if (!c.sure || c.i < 0) return false;
+      var inst = !c.cls, de = document.documentElement, ok = false;
+      if (inst) { css(); de.classList.add("mz-instant"); }
+      try {
+        var K = KEYS[kw];
+        for (var n = 0; n < 80; n++) {
+          c = current(); if (c.i === t) { ok = true; break; }
+          if (!c.sure || c.i < 0) break;
+          var fwd = c.i < t; key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
+          if (current().i === c.i) break;
+        }
+      } finally {
+        if (inst) { sig(); de.classList.remove("mz-instant"); }
+      }
+      return ok;
+    }
+    // Keeps trying, one attempt per settled state, until page t shows.
+    function steps(t, token) {
+      var tries = 0, stuck = 0, lastI = null;
       (function one() {
         if (token !== navToken) return;
-        if (jumpSync(t)) return;
+        var r = callNav(t);
+        if (r === "reached") return finish(token);
+        if (r === "none") {
+          if (navTarget == null) { var c0 = current(), sn = c0.sure ? snapshot(c0.i) : null; if (sn) sn.cls = !!c0.cls; hold(sn, t); }
+          if (jumpInstant(t)) return finish(token);
+        }
         waitStable(function (i) {
-          if (token !== navToken || i === t || i < 0 || tries++ > 80) return;
-          var fwd = i < t, K = KEYS[kw], waited = 0;
-          key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
-          (function poll() {
-            if (token !== navToken) return;
-            var n = current();
-            if (n.i !== i && n.i >= 0) { fails = 0; return one(); }
-            if ((waited += 60) > 900) { if (++fails >= KEYS.length) return; kw = (kw + 1) % KEYS.length; return one(); }
-            setTimeout(poll, 60);
-          })();
+          if (token !== navToken) return;
+          if (i === t || i < 0 || ++tries > 60) return finish(token);
+          if (i === lastI) { if (++stuck % 6 === 0) kw = (kw + 1) % KEYS.length; } else stuck = 0;
+          lastI = i;
+          one();
         });
       })();
     }
-    function go(t) {
-      var ps = pages(), c = current(); if (t < 0 || t >= total() || c.i === t) return;
-      if (!c.deck && ps[t] && scroller(ps[t])) {
-        var token = ++navToken;
-        ps[t].scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start", inline: "start" });
-        waitStable(function (i) { if (token === navToken && i !== t) steps(t); });
-      } else steps(t);
+    function go(t, token) {
+      if (token == null) token = ++navToken;
+      var ps = pages(), c = current();
+      if (t < 0 || t >= total()) return finish(token);
+      if (c.i === t) return finish(token);
+      if (!c.deck && ps[t] && scroller(ps[t]) && navFn() == null) {
+        release();
+        ps[t].scrollIntoView({ behavior: "instant", block: "start", inline: "start" });
+        waitStable(function (i) { if (token === navToken && i !== t) steps(t, token); });
+      } else steps(t, token);
     }
 
     function boot() {
