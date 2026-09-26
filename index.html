@@ -361,7 +361,7 @@
 
   /* ---------- step 2: build the merged file ---------- */
   const EXTRA_CSS = `
-.mz-slide{background:#000!important;overflow:hidden!important}
+.mz-slide{background:#000!important;overflow:hidden!important;isolation:isolate!important}
 .mz-fill{position:absolute!important;inset:0!important;z-index:50!important;display:flex!important;align-items:center!important;justify-content:center!important;background:#000!important;margin:0!important;padding:0!important;transform:none!important}
 .mz-fill img,.mz-fill video{width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;object-fit:contain!important;display:block!important;margin:0!important;padding:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:#000!important}
 html.mz-scroll{overflow-x:hidden}
@@ -438,13 +438,21 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
   }
 
   function findDotGroups(doc, slides) {
-    const out = [];
+    const out = [], inside = [];
     doc.body.querySelectorAll("*").forEach(el => {
       if (SKIP.test(el.tagName)) return;
-      if (slides.some(s => s.contains(el) || el.contains(s))) return;
+      if (slides.some(s => el.contains(s))) return;
       const k = dotKids(el);
-      if (k && k.length === slides.length && !out.some(g => g.el.contains(el) || el.contains(g.el))) out.push({ el, kids: k });
+      if (!k || k.length !== slides.length) return;
+      const home = slides.find(s => s.contains(el)) || null;
+      const list = home ? inside : out;
+      if (!list.some(g => g.el.contains(el) || el.contains(g.el))) list.push({ el, kids: k, home });
     });
+    // Some decks repeat the dot row inside every slide. Only trust rows that
+    // really repeat across the deck, so a slide showing "6 steps" isn't mistaken
+    // for navigation.
+    const homes = new Set(inside.map(g => g.home));
+    if (homes.size >= 2 && homes.size * 2 >= slides.length) out.push(...inside);
     return out;
   }
 
@@ -489,6 +497,7 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
       if (p.id[0] === "s") return { node: kids[+p.id.slice(1)], j: +p.id.slice(1) };
       const c = tpl.cloneNode(true);
       [c, ...c.querySelectorAll("[id]")].forEach(x => { if (x.id && !/\d/.test(x.id)) x.removeAttribute("id"); });
+      c.setAttribute("data-mz-made", "");
       return { node: c, j: tplIdx };
     });
     kids.forEach(k => k.remove());
@@ -499,10 +508,13 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
       if (ariaSel) it.node.setAttribute("aria-selected", "false");
       el.appendChild(it.node);
     });
-    if (list[0]) {
-      onCls.forEach(c => list[0].node.classList.add(c));
-      if (ariaCur) list[0].node.setAttribute("aria-current", ariaCur);
-      if (ariaSel) list[0].node.setAttribute("aria-selected", "true");
+    // the row's own slide for rows inside slides, otherwise the first page
+    const kept = pages.filter(p => !p.removed);
+    const at = group.home ? Math.max(0, kept.findIndex(p => p.el === group.home)) : 0;
+    if (list[at]) {
+      onCls.forEach(c => list[at].node.classList.add(c));
+      if (ariaCur) list[at].node.setAttribute("aria-current", ariaCur);
+      if (ariaSel) list[at].node.setAttribute("aria-selected", "true");
     }
     el.setAttribute("data-mz-dots", "");
     if (onCls[0]) el.setAttribute("data-mz-dot-active", onCls[0]);
@@ -525,7 +537,7 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
   function mzDots(C) {
     var ACT = C.act, HINT = /dot|indicator|bullet|pagin|pager|progress|nav|step|pip|marker|thumb/i;
     var SKIPT = /^(SCRIPT|STYLE|LINK|META|TEMPLATE|NOSCRIPT|BASE|TITLE)$/;
-    var groups = [], counters = [], navToken = 0, queued = false, dotOff = null;
+    var groups = [], counters = [], navToken = 0, queued = false, syncKeys = null;
     var slice = function (l) { return Array.prototype.slice.call(l); };
     function pages() { return slice(document.querySelectorAll("[data-mz-page]")); }
     function kids(el) { return slice(el.children).filter(function (c) { return !SKIPT.test(c.tagName); }); }
@@ -600,44 +612,84 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     // skip the title slide, or use a fixed number).
     function wrongCount(n) { var T = total(); return n !== T && (n === C.orig || n === C.keptUser || (n < T && n >= T - 3)); }
 
+    // Each of the deck's own dots keeps a note of its place in the deck's row
+    // (data-mz-j). The deck's dot j opens page j + g.joff; joff is 0 for decks that
+    // build their slide list from the page, which then includes the cover and video.
+    function jOf(d) { var j = d.getAttribute("data-mz-j"); return j == null ? null : +j; }
+    function isMade(d) { return d.hasAttribute("data-mz-clone"); }
     function fixGroup(g) {
       var k = kids(g.el); if (!wrongCount(k.length)) return;
       g.fixing = true;
       if (!g.cls) g.cls = onCls(k);
-      var deckOn = g.cls ? k.filter(function (d) { return d.classList.contains(g.cls); })[0] : null;
+      k.forEach(function (d, j) { if (!isMade(d) && jOf(d) == null) d.setAttribute("data-mz-j", String(j)); });
+      var deckOn = g.cls ? k.filter(function (d) { return !isMade(d) && d.classList.contains(g.cls); })[0] : null;
       var nowAt = current();
-      var tpl = k.filter(function (d) { return !isOn(d, g); })[0] || k[0];
-      var deckCounts = !!readTruth();
-      if (!deckCounts && k.length === C.orig && C.removedUser.length) {
-        C.removedUser.slice().sort(function (a, b) { return b - a; }).forEach(function (i) { if (k[i]) k[i].remove(); });
-        k = kids(g.el);
+      if (deckOn && nowAt.sure && nowAt.i >= 0) g.joff = nowAt.i - jOf(deckOn);
+      if (g.joff == null) g.joff = 0;
+      var T = total(), slots = new Array(T);
+      var tpl = k.filter(function (d) { return !isMade(d) && !isOn(d, g); })[0] || k[0];
+      // Put every dot where its page is, so the n-th dot is the n-th page and
+      // the deck's own "dots.children[i]" still finds its dot i.
+      k.forEach(function (d) {
+        if (isMade(d)) { d.remove(); return; }
+        var p = jOf(d) + g.joff;
+        if (p >= 0 && p < T && !slots[p]) slots[p] = d; else d.remove();
+      });
+      for (var p = 0; p < T; p++) {
+        var d = slots[p];
+        if (!d) {
+          d = tpl.cloneNode(true);
+          [d].concat(slice(d.querySelectorAll("[id]"))).forEach(function (x) { x.removeAttribute("id"); });
+          ACT.forEach(function (a) { d.classList.remove(a); });
+          if (g.cls) d.classList.remove(g.cls);
+          d.removeAttribute("aria-current"); d.removeAttribute("data-mz-j");
+          d.setAttribute("data-mz-clone", "");
+        }
+        g.el.appendChild(d);
       }
-      // Old-count rows are missing the cover and video dots at the front;
-      // rows built from the live slide list are missing dots at the end.
-      var add = total() - k.length, first = !deckCounts && (k.length === C.orig || k.length === C.keptUser) ? k[0] : null;
-      for (var i = 0; i < add; i++) {
-        var c = tpl.cloneNode(true);
-        [c].concat(slice(c.querySelectorAll("[id]"))).forEach(function (x) { x.removeAttribute("id"); });
-        ACT.forEach(function (a) { c.classList.remove(a); });
-        c.removeAttribute("aria-current");
-        c.setAttribute("data-mz-clone", "");
-        g.el.insertBefore(c, first);
-      }
-      for (i = add; i < 0; i++) { var ks = kids(g.el); ks[ks.length - 1].remove(); }
       kids(g.el).forEach(function (d, n) {
         var l = d.getAttribute("aria-label"); if (l && /\d+/.test(l)) d.setAttribute("aria-label", l.replace(/\d+/, String(n + 1)));
         if (!d.children.length && /^\s*\d+\s*$/.test(d.textContent)) d.textContent = String(n + 1);
       });
-      // The deck highlighted its dot for the current slide; where that dot sits
-      // now tells us how the deck's dots line up with the slides.
-      if (deckOn && document.contains(deckOn) && nowAt.sure && nowAt.i >= 0) dotOff = nowAt.i - kids(g.el).indexOf(deckOn);
       g.mode = "runtime"; g.fixing = false;
     }
 
+    // Which page a dot opens: what was seen when it was clicked, else its place.
+    function pageOf(g, d) {
+      if (g.map.has(d)) return g.map.get(d);
+      if (isMade(d)) return null;
+      var j = jOf(d);
+      return (j != null ? j : kids(g.el).indexOf(d)) + (g.joff || 0);
+    }
+    function learn(g, pick, i) {
+      g.map.set(pick, i);
+      if (!isMade(pick) && !pick.hasAttribute("data-mz-made")) {
+        var j = jOf(pick); g.joff = i - (j != null ? j : kids(g.el).indexOf(pick));
+      }
+    }
+    function spotIn(from, target, to) {
+      var path = [];
+      for (var n = target; n && n !== from; n = n.parentElement) path.unshift(slice(n.parentElement.children).indexOf(n));
+      var x = to;
+      for (var j = 0; j < path.length; j++) { var y = x.children[path[j]]; if (!y) return x; x = y; }
+      return x;
+    }
+    // the dot known to open page t; failing that, the known dot closest to t on
+    // the way there from page `from`, so nothing past t is ever shown
+    function dotFor(g, ks, t, from, not) {
+      var best = null, bp = null;
+      for (var i = 0; i < ks.length; i++) {
+        var d = ks[i]; if (d === not) continue;
+        var p = pageOf(g, d); if (p == null) continue;
+        if (p === t) return d;
+        if (from >= 0 && ((from < t && p > from && p < t) || (from > t && p < from && p > t)) && (bp == null || Math.abs(t - p) < Math.abs(t - bp))) { best = d; bp = p; }
+      }
+      return best;
+    }
     function register(el, mode) {
       if (groups.some(function (g) { return g.el === el; })) return;
       var k = kids(el);
-      var g = { el: el, mode: mode, cls: el.getAttribute("data-mz-dot-active") || onCls(k),
+      var g = { el: el, mode: mode, joff: null, map: new WeakMap(), cls: el.getAttribute("data-mz-dot-active") || onCls(k),
         aria: k.some(function (d) { return d.hasAttribute("aria-current"); }) ? "aria-current" : k.some(function (d) { return d.hasAttribute("aria-selected"); }) ? "aria-selected" : null };
       groups.push(g);
       fixGroup(g);
@@ -646,22 +698,32 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
         var ks = kids(el), d = ks.filter(function (c) { return c === ev.target || c.contains(ev.target); })[0];
         if (!d) return;
         var t = ks.indexOf(d);
-        navToken++;
-        // Trigger the deck's own dot that really opens slide t (the deck's dots
-        // can be shifted by the added cover and video), then finish any
-        // remaining step in the same moment, so no in-between slide is drawn.
         ev.preventDefault(); ev.stopImmediatePropagation();
-        var real = ks.filter(function (x) { return !x.hasAttribute("data-mz-clone"); });
-        if (!real.length) return go(t);
-        var q = t - (dotOff || 0);
-        var pick = ks[q] && !ks[q].hasAttribute("data-mz-clone") ? ks[q]
-          : real.reduce(function (a, b) { return Math.abs(ks.indexOf(b) - q) < Math.abs(ks.indexOf(a) - q) ? b : a; });
-        var before = current().i;
-        g.pass = true; try { pick.click(); } finally { g.pass = false; }
-        var after = current();
-        if (after.i !== before && after.i >= 0) dotOff = after.i - ks.indexOf(pick);
-        if (after.i === t) return;
-        if (!jumpSync(t)) waitStable(function (i) { if (i !== t) go(t); });
+        var token = ++navToken, start = current(), before = start.sure ? start.i : -1;
+        if (start.sure && start.i === t) return;
+        var pick = pageOf(g, d) === t ? d : dotFor(g, ks, t, before, null), tried = [];
+        // Everything below up to waitStable runs in one go, before the browser
+        // draws, so a dot that opens the wrong page is corrected unseen.
+        var pending = false;
+        for (var n = 0; pick && n < 3; n++) {
+          tried.push(pick); pending = true;
+          var hit = spotIn(d, ev.target, pick);
+          g.pass = true; try { hit.click(); } finally { g.pass = false; }
+          var after = current();
+          if (!(after.sure && after.i >= 0 && after.i !== before)) break;   // not switched yet (animating) or ignored
+          learn(g, pick, after.i); before = after.i; pending = false;
+          if (after.i === t) return;
+          pick = dotFor(g, ks, t, before, null);
+          if (pick && tried.indexOf(pick) >= 0) pick = null;
+        }
+        // keys only when no dot click may still be taking effect
+        if (!pending && current().sure && jumpSync(t)) return;
+        var last = tried[tried.length - 1], was = before;
+        waitStable(function (i) {
+          if (token !== navToken) return;
+          if (last && i >= 0 && i !== was) learn(g, last, i);
+          if (i !== t) go(t);
+        });
       }, true);
       new MutationObserver(function () {
         if (g.fixing) return;
@@ -721,14 +783,22 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
     }
     function schedule() { if (!queued) { queued = true; requestAnimationFrame(sync); } }
 
+    // Where every page sits and how opaque it is: unchanged across a few samples
+    // means any slide transition has finished.
+    function sig() {
+      return pages().map(function (p) {
+        var r = p.getBoundingClientRect();
+        return Math.round(r.left) + "," + Math.round(r.top) + "," + Math.round(r.width) + "," + Math.round(+getComputedStyle(p).opacity * 20);
+      }).join(";");
+    }
     function waitStable(cb) {
-      var last = -2, same = 0, t0 = Date.now();
+      var last = null, same = 0, t0 = Date.now();
       (function p() {
-        var c = current();
-        if (c.sure && c.i === last) { if (++same >= 3) return cb(c.i); } else same = 0;
-        last = c.i;
+        var c = current(), s = c.i + "|" + sig();
+        if (c.sure && s === last) { if (++same >= 2) return cb(c.i); } else same = 0;
+        last = s;
         if (Date.now() - t0 > 3000) return cb(c.i);
-        setTimeout(p, 100);
+        setTimeout(p, 80);
       })();
     }
     function scroller(el) {
@@ -745,39 +815,50 @@ tick();setInterval(tick,400);addEventListener('resize',tick);
       try { Object.defineProperty(e, "keyCode", { get: function () { return code; } }); Object.defineProperty(e, "which", { get: function () { return code; } }); } catch (x) {}
       (document.body || document).dispatchEvent(e);
     }
-    // Steps with the arrow key inside one task. Decks that switch slides
-    // straight away reach the target before the browser draws anything.
+    // Steps with the arrow key inside one task, for decks that switch slides
+    // straight away, so the target is reached before the browser draws anything.
+    // Decks that animate don't switch straight away: after the first key shows
+    // that, this is never tried again, because a key is then still in flight
+    // and pressing more would overshoot.
     function jumpSync(t) {
+      if (syncKeys === false) return false;
       var K = KEYS[kw];
       for (var n = 0; n < 80; n++) {
         var c = current(); if (c.i === t) return true;
+        if (!c.sure || c.i < 0) return false;
         var fwd = c.i < t; key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
-        if (current().i === c.i) return false;
+        var now = current();
+        if (now.i === c.i) { syncKeys = false; return false; }
+        syncKeys = true;
       }
       return current().i === t;
     }
+    // One key at a time, each only after the previous slide change has finished.
     function steps(t) {
-      if (jumpSync(t)) return;
       var token = ++navToken, tries = 0, fails = 0;
       (function one() {
         if (token !== navToken) return;
-        var c = current(); if (c.i === t || tries++ > 80) return;
-        var fwd = c.i < t, K = KEYS[kw], start = c.i, waited = 0;
-        key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
-        (function poll() {
-          if (token !== navToken) return;
-          var n = current();
-          if (n.i !== start && n.i >= 0) { fails = 0; return setTimeout(one, 40); }
-          if ((waited += 60) > 900) { if (++fails >= KEYS.length) return; kw = (kw + 1) % KEYS.length; return one(); }
-          setTimeout(poll, 60);
-        })();
+        if (jumpSync(t)) return;
+        waitStable(function (i) {
+          if (token !== navToken || i === t || i < 0 || tries++ > 80) return;
+          var fwd = i < t, K = KEYS[kw], waited = 0;
+          key(K[0], fwd ? K[1] : K[2], fwd ? K[3] : K[4]);
+          (function poll() {
+            if (token !== navToken) return;
+            var n = current();
+            if (n.i !== i && n.i >= 0) { fails = 0; return one(); }
+            if ((waited += 60) > 900) { if (++fails >= KEYS.length) return; kw = (kw + 1) % KEYS.length; return one(); }
+            setTimeout(poll, 60);
+          })();
+        });
       })();
     }
     function go(t) {
       var ps = pages(), c = current(); if (t < 0 || t >= total() || c.i === t) return;
       if (!c.deck && ps[t] && scroller(ps[t])) {
+        var token = ++navToken;
         ps[t].scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start", inline: "start" });
-        waitStable(function (i) { if (i !== t) steps(t); });
+        waitStable(function (i) { if (token === navToken && i !== t) steps(t); });
       } else steps(t);
     }
 
